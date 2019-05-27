@@ -1,0 +1,2 @@
+/usr/bin/ar qc libconstraintloss.a  CMakeFiles/constraintloss.dir/constraintsoftmax.cpp.o
+/usr/bin/ranlib libconstraintloss.a
