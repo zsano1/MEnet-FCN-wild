@@ -1,1 +1,0 @@
-# MEnet-FCN-wild
