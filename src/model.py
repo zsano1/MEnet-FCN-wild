@@ -33,9 +33,11 @@ class FCN8VGG:
             logging.info("Load npy file from '%s'.", vgg16_npy_path)
         
         self.data_dict = np.load(vgg16_npy_path, encoding='latin1').item()
-        self.wd = 5e-4
         print("npy file loaded")
         '''
+        self.wd = 5e-4
+
+    '''
     def bn_scale_relu_conv(self, bottom, train, nout, conv_type = 'conv', name='BatchNorm', ks=3, stride=1, pad='SAME'):
         param_shape = bottom.get_shape()[-1]
         moving_decay = 0.9
@@ -63,20 +65,40 @@ class FCN8VGG:
             bn=tf.nn.batch_normalization(bottom, mean1, var1, beta1, gamma1, eps)
 
             relu1=tf.nn.relu(bn)
-
             kernel_size=[ks,ks]
-            return tf.cond(tf.equal(conv_type, 'conv'), lambda :layers.conv2d(relu1,nout,kernel_size,stride,pad),
-                           lambda :layers.conv2d_transpose(relu1,nout,kernel_size,stride,pad))
+            in_dim=relu1.get_shape()[-1]
+            filter=tf.Variable(tf.random_normal([ks,ks,tf.cast(in_dim,tf.int32),nout]))
+            filter_transpose=tf.Variable(tf.random_normal([ks,ks,nout,tf.cast(in_dim,tf.int32)]))
+            stri=[stride,stride,stride,stride]
 
+            def deconv(relu1):
+                return tf.nn.conv2d_transpose(relu1, filter=filter_transpose,
+                                              output_shape=[tf.cast(relu1.get_shape()[0], tf.int32), ks, ks, nout],
+                                              strides=stri, padding=pad)
 
+            print("filter", filter.get_shape())
+            return tf.cond(tf.equal(conv_type, 'conv'), lambda: tf.nn.conv2d(relu1, filter, stri, pad),
+                           lambda: deconv(relu1))
+
+    
     def conv_bn_scale_relu(self, bottom, train, nout, conv_type = 'conv', name='BatchNorm', ks=3, stride=1, pad='SAME'):
         moving_decay = 0.9
         eps = 1e-5
         with tf.variable_scope(name):
             kernel_size=[ks,ks]
+            in_dim=bottom.get_shape()[-1]
+            filter=tf.Variable(tf.random_normal([ks,ks,tf.cast(in_dim,tf.int32),nout]))
+            filter_transpose=tf.Variable(tf.random_normal([ks,ks,nout,tf.cast(in_dim,tf.int32)]))
+            stri=[stride,stride,stride,stride]
+            def deconv(bottom):
+                return tf.nn.conv2d_transpose(bottom,filter=filter_transpose,
+                                              output_shape=[tf.cast(bottom.get_shape()[0],tf.int32),ks,ks,nout],
+                                              strides=stri,padding=pad)
 
-            conv=tf.cond(tf.equal(conv_type, 'conv'), lambda: layers.conv2d(bottom, nout, kernel_size, stride, pad),
-                    lambda: layers.conv2d_transpose(bottom, nout, kernel_size, stride, pad))
+            print("filter",filter.get_shape())
+            conv=tf.cond(tf.equal(conv_type, 'conv'), lambda :tf.nn.conv2d(bottom,filter,stri,pad),
+                         lambda :deconv(bottom))
+
 
             param_shape = conv.get_shape()[-1]
 
@@ -102,15 +124,88 @@ class FCN8VGG:
             bn=tf.nn.batch_normalization(conv, mean, var, beta, gamma, eps)
 
             relu=tf.nn.relu(bn)
+            print(relu.get_shape())
+            return relu
+    '''
+
+    def bn_scale_relu_conv(self, bottom, train, nout, conv_type='conv', name='BatchNorm', ks=3, stride=1, pad='SAME'):
+        param_shape = bottom.get_shape()[-1]
+        moving_decay = 0.9
+        eps = 1e-5
+        with tf.variable_scope(name):
+            gamma1 = tf.get_variable('gamma', param_shape, initializer=tf.constant_initializer(1))
+            beta1 = tf.get_variable('beat1', param_shape, initializer=tf.constant_initializer(0))
+            ema1 = tf.train.ExponentialMovingAverage(moving_decay)
+            axes1 = list(range(len(bottom.get_shape()) - 1))
+            batch_mean1, batch_var1 = tf.nn.moments(bottom, axes1, name='moments')
+
+            # 采用滑动平均更新均值与方差
+            ema1 = tf.train.ExponentialMovingAverage(moving_decay)
+
+            def mean_var_with_update():
+                ema_apply_op1 = ema1.apply([batch_mean1, batch_var1])
+                with tf.control_dependencies([ema_apply_op1]):
+                    return tf.identity(batch_mean1), tf.identity(batch_var1)
+
+            # 训练时，更新均值与方差，测试时使用之前最后一次保存的均值与方差
+            mean1, var1 = tf.cond(tf.equal(train, True), mean_var_with_update,
+                                  lambda: (ema1.average(batch_mean1), ema1.average(batch_var1)))
+
+            # 最后执行batch normalization
+            bn = tf.nn.batch_normalization(bottom, mean1, var1, beta1, gamma1, eps)
+
+            relu1 = tf.nn.relu(bn)
+
+            kernel_size = [ks, ks]
+            return tf.cond(tf.equal(conv_type, 'conv'), lambda: layers.conv2d(relu1, nout, kernel_size, stride, pad),
+                           lambda: layers.conv2d_transpose(relu1, nout, kernel_size, stride, pad))
+
+    def conv_bn_scale_relu(self, bottom, train, nout, conv_type='conv', name='BatchNorm', ks=3, stride=1, pad='SAME'):
+        moving_decay = 0.9
+        eps = 1e-5
+        with tf.variable_scope(name):
+            kernel_size = [ks, ks]
+
+            conv = tf.cond(tf.equal(conv_type, 'conv'), lambda: layers.conv2d(bottom, nout, kernel_size, stride, pad),
+                           lambda: layers.conv2d_transpose(bottom, nout, kernel_size, stride, pad))
+
+            param_shape = conv.get_shape()[-1]
+
+            ema = tf.train.ExponentialMovingAverage(moving_decay)
+            axes = list(range(len(conv.get_shape()) - 1))
+            batch_mean, batch_var = tf.nn.moments(conv, axes, name='moments')
+            gamma = tf.get_variable('gamma', param_shape, initializer=tf.constant_initializer(1))
+            beta = tf.get_variable('beat', param_shape, initializer=tf.constant_initializer(0))
+
+            # 采用滑动平均更新均值与方差
+            ema = tf.train.ExponentialMovingAverage(moving_decay)
+
+            def mean_var_with_update():
+                ema_apply_op = ema.apply([batch_mean, batch_var])
+                with tf.control_dependencies([ema_apply_op]):
+                    return tf.identity(batch_mean), tf.identity(batch_var)
+
+            # 训练时，更新均值与方差，测试时使用之前最后一次保存的均值与方差
+            mean, var = tf.cond(tf.equal(train, True), mean_var_with_update,
+                                lambda: (ema.average(batch_mean), ema.average(batch_var)))
+
+            # 最后执行batch normalization
+            bn = tf.nn.batch_normalization(conv, mean, var, beta, gamma, eps)
+
+            relu = tf.nn.relu(bn)
 
             return relu
 
     def rs(self, data, target_size):#resize
-        if data.shape==target_size.shape:
+        if data.get_shape()==target_size:
             return data
         else:
-            original_size = data.shape
-            resize_data = np.zeros([original_size[0], original_size[1], target_size[2], target_size[3]])
+            original_size = data.get_shape()
+            print("origin",original_size)
+            print("target",target_size)
+            resize_data = np.zeros([original_size[0], target_size[1], target_size[2], original_size[3]])
+            print("resize",resize_data.shape)
+            print(target_size[2],original_size[2])
             x_step = target_size[2] / original_size[2]
             y_step = target_size[3] / original_size[3]
             for i in range(original_size[2]):
@@ -119,7 +214,7 @@ class FCN8VGG:
             return resize_data
 
     #def build(self, rgb, task_labels, domain_label, batch_size, train=False, num_classes=19, city='Taipei', 
-    def build(self, batch_size, img_w=512, img_h=256, train=False, num_classes=19, city='Taipei', 
+    def build(self, batch_size, img_w=32, img_h=64, train=False, num_classes=19, city='Taipei',
               random_init_fc8=False, random_init_adnn=False, debug=False):
         
         if city=='syn2real':
@@ -131,9 +226,11 @@ class FCN8VGG:
     
         self.rgb = tf.placeholder(tf.int32, shape = [batch_size, img_h, img_w, 3], name = 'rgb')
         self.task_labels = tf.placeholder(tf.float32, shape = [batch_size, img_h, img_w, 1], name = 'task_labels') 
-        
-        self.domain_labels = tf.placeholder(tf.float32, shape = [batch_size, int(img_h/8), int(img_w/8), 1], name = 'domain_labels')
+        print("taskk_label_origin",self.task_labels.get_shape())
+
+        self.domain_labels = tf.placeholder(tf.float32, shape = [batch_size, int(img_h), int(img_w), 1], name = 'domain_labels')
         domain_label = tf.cast(tf.squeeze(self.domain_labels, [3]), tf.int32)
+        print("domain_label",domain_label.get_shape())
         # Convert RGB to BGR
         with tf.name_scope('Processing'):
 
@@ -163,15 +260,39 @@ class FCN8VGG:
             nout=32
             ks=3
             repeat=2
-            result = self.conv_bn_scale_relu(self.bgr,train,nout,ks=ks)
+            print("bgr",self.bgr.get_shape())
+
+            result = self.conv_bn_scale_relu(self.bgr,train,nout,ks=ks,name="init")
 
             data_f=self.bn_scale_relu_conv(self.bgr,train,nout=1,ks=ks,name="conv_0")
+            print("dataf",data_f.get_shape())
+
+            '''
+            result1 = self.bn_scale_relu_conv(result, train, nout, ks=ks, name="conv_0_0_0")
+            result2 = self.bn_scale_relu_conv(result1, train, nout, ks=ks, name="conv_0_0_1")
+            result = tf.add(result2, result)
+            result1 = self.bn_scale_relu_conv(result, train, nout, ks=ks, name="conv_0_1_0")
+            result2 = self.bn_scale_relu_conv(result1, train, nout, ks=ks, name="conv_0_1_1")
+            result = tf.add(result2, result)
+            scale0=tf.identity(result)
+            scale0_m=self.bn_scale_relu_conv(scale0,train,nout=1,ks=ks,name="scale0")
+
+            result1=self.bn_scale_relu_conv(scale0,train,nout=2*nout,ks=ks,stride=2,name="conv_1_0_0" )
+            result=self.bn_scale_relu_conv(scale0,train,nout=2*nout,ks=1,stride=1,name="conv_1_0_1")
+            result2=self.bn_scale_relu_conv(result1,train,nout=2*nout,ks=ks,name="conv_1_0" )
+            result=tf.add(result2,result)
+            result1=self.bn_scale_relu_conv(result,train,nout=2*nout,ks=ks,name="conv_1_1_0")
+            result2 = self.bn_scale_relu_conv(result1, train, nout=2 * nout, ks=ks, name="conv_1_1")
+            scale1 = tf.add(result2, result)
+            scale1_m=self.bn_scale_relu_conv(scale1,train,nout=1,ks=ks,name="scale1")
+            
+            '''
+
             for i in range(repeat):
                 result1=self.bn_scale_relu_conv(result,train,nout,ks=ks,name="conv_0_%s_0" %i)
                 result2=self.bn_scale_relu_conv(result1,train,nout,ks=ks,name="conv_0_%s_1" %i)
                 result=tf.add(result2,result)
-            scale0=result
-            scale0_m= self.bn_scale_relu_conv(scale0,train,nout=1,ks=ks,name="scale0")
+            scale0_m= self.bn_scale_relu_conv(result,train,nout=1,ks=ks,name="scale0")
 
             for i in range(repeat):
                 if i==0:
@@ -181,56 +302,59 @@ class FCN8VGG:
                     result1=self.bn_scale_relu_conv(result,train,nout=2*nout,ks=ks,name="conv_1_%s_0" %i)
                 result2=self.bn_scale_relu_conv(result1,train,nout=2*nout,ks=ks,name="conv_1_%s" %i )
                 result=tf.add(result2,result)
-            scale1=result
+            scale1=tf.identity(result)
             scale1_m =self.bn_scale_relu_conv(scale1,train,nout=1,ks=ks,name="scale1")
+            print("zsa1",result.get_shape())
 
             for i in range(repeat):
                 if i==0:
                     result1=self.bn_scale_relu_conv(result,train,nout=nout*4,ks=ks,stride=2,name="conv_2_%s_0" %i)
-                    result=self.bn_scale_relu_conv(result,train,nout=4*nout,ks=1,stride=2,name="conv_2_%s_1" %i)
+                    result=self.bn_scale_relu_conv(result,train,nout=4*nout,ks=1,stride=1,name="conv_2_%s_1" %i)
                 else:
                     result1=self.bn_scale_relu_conv(result,train,nout=nout*4,ks=ks,stride=1,name="conv_2_%s_0" %i)
                 result2=self.bn_scale_relu_conv(result1,train,nout=4*nout,ks=ks,name="conv_2_%s" %i)
                 result=tf.add(result2,result)
-            scale2=result
+            scale2 = tf.identity(result)
             scale2_m=self.bn_scale_relu_conv(scale2,train,nout=1,ks=ks,name="scale2")
+            print("zsa",result.get_shape())
 
             for i in range(repeat):
                 if i==0:
                     result1=self.bn_scale_relu_conv(result,train,nout=nout*8,ks=ks,stride=2,name="conv_3_%s_0" %i)
-                    result=self.bn_scale_relu_conv(result,train,nout=8*nout,ks=1,stride=2,name="conv_3_%s_1" %i)
+                    result=self.bn_scale_relu_conv(result,train,nout=8*nout,ks=1,stride=1,name="conv_3_%s_1" %i)
                 else:
                     result1=self.bn_scale_relu_conv(result,train,nout=nout*8,ks=ks,stride=1,name="conv_3_%s_0" %i)
                 result2=self.bn_scale_relu_conv(result1,train,nout=8*nout,ks=ks,name="conv_3_%s" %i)
                 result=tf.add(result2,result)
-            scale3=result
+            scale3 = tf.identity(result)
             scale3_m=self.bn_scale_relu_conv(scale3,train,nout=1,ks=ks,name="scale3")
+            print("zsa",result.get_shape())
 
             for i in range(repeat):
                 if i==0:
                     result1=self.bn_scale_relu_conv(result,train,nout=nout*16,ks=ks,stride=2,name="conv_4_%s_0" %i)
-                    result=self.bn_scale_relu_conv(result,train,nout=16*nout,ks=1,stride=2,name="conv_4_%s_1" %i)
+                    result=self.bn_scale_relu_conv(result,train,nout=16*nout,ks=1,stride=1,name="conv_4_%s_1" %i)
                 else:
                     result1=self.bn_scale_relu_conv(result,train,nout=nout*16,ks=ks,stride=1,name="conv_4_%s_0" %i)
                 result2=self.bn_scale_relu_conv(result1,train,nout=16*nout,ks=ks,name="conv_4_%s" %i)
                 result=tf.add(result2,result)
-            scale4=result
+            scale4 = tf.identity(result,name="s4")
             scale4_m=self.bn_scale_relu_conv(scale4,train,nout=1,ks=ks,name="scale4")
 
             for i in range(repeat):
                 if i==0:
                     result1=self.bn_scale_relu_conv(result,train,nout=nout*32,ks=ks,stride=2,name="conv_5_%s_0" %i)
-                    result=self.bn_scale_relu_conv(result,train,nout=32*nout,ks=1,stride=2,name="conv_5_%s_1" %i)
+                    result=self.bn_scale_relu_conv(result,train,nout=32*nout,ks=1,stride=1,name="conv_5_%s_1" %i)
                 else:
                     result1=self.bn_scale_relu_conv(result,train,nout=nout*32,ks=ks,stride=1,name="conv_5_%s_0" %i)
                 result2=self.bn_scale_relu_conv(result1,train,nout=32*nout,ks=ks,name="conv_5_%s" %i)
                 result=tf.add(result2,result)
-            scale5=result
-            scale5_m=self.bn_scale_relu_conv(scale3,train,nout=1,ks=ks,name="sclae5")
+            scale5 = tf.identity(result, name="s5")
+            scale5_m=self.bn_scale_relu_conv(scale5,train,nout=1,ks=ks,name="sclae5")
 
-            result=self.bn_scale_relu_conv(result,train,nout=32*nout,ks=7,name="middle_white")
+            result_adv=self.bn_scale_relu_conv(result,train,nout=32*nout,ks=7,name="middle_white")
             # zsa：上行为白色，1*1的中间部分
-
+            print("result_adversial",result_adv.get_shape())
 
             """
             self.conv1_1 = self._conv_layer(self.bgr, "conv1_1")
@@ -264,88 +388,103 @@ class FCN8VGG:
                 """
         
         with tf.variable_scope('label_predictor'):
-            result=self.bn_scale_relu_conv(result,train,nout=32*nout,conv_type='dconv',ks=7,name="dconv_1")
+            result=self.bn_scale_relu_conv(result_adv,train,nout=32*nout,conv_type='dconv',ks=7,name="dconv_1")
+            print("result:",result.get_shape())
+
             scale5_u=self.bn_scale_relu_conv(result,train,nout=1,ks=ks,name="scale5_u")
-            result=tf.concat(result,scale5)
+
+            print("scale5_u",scale5_u.get_shape())
+
+            result=tf.concat([result,scale5],3)
+            print("result:",result.get_shape())
+
             for i in range(repeat):
                 if i==0:
                     result1=self.bn_scale_relu_conv(result,train,nout=16*nout,conv_type='dconv',ks=4,stride=2,name="dconv_1_%s_0" %i)
-                    result=self.bn_scale_relu_conv(result,train,nout=16*nout,conv_type='dconv',ks=2,stride=2,name="dconv_1_%s_1" %i)
+                    result=self.bn_scale_relu_conv(result,train,nout=16*nout,conv_type='dconv',ks=2,stride=1,name="dconv_1_%s_1" %i)
                 else:
                     result1=self.bn_scale_relu_conv(result,train,nout=16*nout,ks=ks,name="dconv_1_%s_0" %i)
                 result2=self.bn_scale_relu_conv(result1,train,nout=16*nout,ks=ks,name="dconv_1_%s" %i)
                 result=tf.add(result2,result)
             scale4_u=self.bn_scale_relu_conv(result,train,nout=1,name="scale4_u")
+            print("result:",result.get_shape())
+            print("scale4_u",scale4_u.get_shape())
 
-            result=tf.concat(result,scale4)
+            result=tf.concat([result,scale4],3)
             for i in range(repeat):
                 if i==0:
                     result1=self.bn_scale_relu_conv(result,train,nout=8*nout,conv_type='dconv',ks=4,stride=2,name="dconv_2_%s_0" %i)
-                    result=self.bn_scale_relu_conv(result,train,nout=8*nout,conv_type='dconv',ks=2,stride=2,name="dconv_2_%s_1" %i)
+                    result=self.bn_scale_relu_conv(result,train,nout=8*nout,conv_type='dconv',ks=2,stride=1,name="dconv_2_%s_1" %i)
                 else:
                     result1=self.bn_scale_relu_conv(result,train,nout=8*nout,ks=ks,name="dconv_2_%s_0" %i)
-                result2=self.bn_scale_relu_conv(result1,train,nout=8*nout,ks=ks,name="dconv_1_%s" %i)
+                result2=self.bn_scale_relu_conv(result1,train,nout=8*nout,ks=ks,name="dconv_2_%s" %i)
                 result=tf.add(result2,result)
             scale3_u=self.bn_scale_relu_conv(result,train,nout=1,name="scale3_u")
+            print("scale3_u",scale3_u.get_shape())
 
-            result=tf.concat(result,scale3)
+            result=tf.concat([result,scale3],3)
             for i in range(repeat):
                 if i==0:
                     result1=self.bn_scale_relu_conv(result,train,nout=4*nout,conv_type='dconv',ks=4,stride=2,name="dconv_3_%s_0" %i)
-                    result=self.bn_scale_relu_conv(result,train,nout=4*nout,conv_type='dconv',ks=2,stride=2,name="dconv_3_%s_1" %i)
+                    result=self.bn_scale_relu_conv(result,train,nout=4*nout,conv_type='dconv',ks=2,stride=1,name="dconv_3_%s_1" %i)
                 else:
                     result1=self.bn_scale_relu_conv(result,train,nout=4*nout,ks=ks,name="dconv_3_%s_0" %i)
                 result2=self.bn_scale_relu_conv(result1,train,nout=4*nout,ks=ks,name="dconv_3_%s" %i)
                 result=tf.add(result2,result)
             scale2_u=self.bn_scale_relu_conv(result,train,nout=1,name="scale2_u")
+            print("scale2_u",scale2_u.get_shape())
 
-            result=tf.concat(result,scale2)
+            result=tf.concat([result,scale2],3)
             for i in range(repeat):
                 if i==0:
                     result1=self.bn_scale_relu_conv(result,train,nout=2*nout,conv_type='dconv',ks=4,stride=2,name="dconv_4_%s_0" %i)
-                    result=self.bn_scale_relu_conv(result,train,nout=2*nout,conv_type='dconv',ks=2,stride=2,name="dconv_4_%s_1" %i)
+                    result=self.bn_scale_relu_conv(result,train,nout=2*nout,conv_type='dconv',ks=2,stride=1,name="dconv_4_%s_1" %i)
                 else:
                     result1=self.bn_scale_relu_conv(result,train,nout=2*nout,ks=ks,name="dconv_4_%s_0" %i)
                 result2=self.bn_scale_relu_conv(result1,train,nout=2*nout,ks=ks,name="dconv_4_%s" %i)
                 result=tf.add(result2,result)
             scale1_u=self.bn_scale_relu_conv(result,train,nout=1,name="scale1_u")
+            print("scale1_u:",scale1_u.get_shape())
 
-            result=tf.concat(result,scale1)
+            result=tf.concat([result,scale1],3,"final")
             for i in range(repeat):
                 if i==0:
                     result1=self.bn_scale_relu_conv(result,train,nout=nout,conv_type='dconv',ks=4,stride=2,name="dconv_5_%s_0" %i)
-                    result=self.bn_scale_relu_conv(result,train,nout=nout,conv_type='dconv',ks=2,stride=2,name="dconv_5_%s_1" %i)
+                    result=self.bn_scale_relu_conv(result,train,nout=nout,conv_type='dconv',ks=2,stride=1,name="dconv_5_%s_1" %i)
                 else:
                     result1=self.bn_scale_relu_conv(result,train,nout=nout,ks=ks,name="dconv_5_%s_0" %i)
                 result2=self.bn_scale_relu_conv(result1,train,nout=nout,ks=ks,name="dconv_5_%s" %i)
                 result=tf.add(result2,result)
             scale0_u=self.bn_scale_relu_conv(result,train,nout=1,name="scale0_u")
+            print("scale0_u:",scale0_u.get_shape())
 
             #计算两层神经元的输出
-            target_size=data_f.shape
+            target_size=data_f.get_shape()
 
 
-            data=np.concatenate((self.rs(data_f,target_size),self.rs(scale0_m,target_size),
-                                 self.rs(scale1_m,target_size), self.rs(scale2_m,target_size),
-                                 self.rs(scale3_m,target_size), self.rs(scale4_m,target_size),
-                                 self.rs(scale5_m,target_size),
-                                 self.rs(scale0_u,target_size), self.rs(scale1_u,target_size),
-                                 self.rs(scale2_u, target_size), self.rs(scale3_u,target_size),
-                                 self.rs(scale4_u,target_size), self.rs(scale5_u,target_size)),axis=1)
+            data=tf.concat([self.rs(data_f,target_size),self.rs(scale0_m,target_size),\
+                                 self.rs(scale1_m,target_size), self.rs(scale2_m,target_size),\
+                                 self.rs(scale3_m,target_size), self.rs(scale4_m,target_size),\
+                                 self.rs(scale5_m,target_size),\
+                                 self.rs(scale0_u,target_size),self.rs(scale1_u,target_size),\
+                                 self.rs(scale2_u,target_size),self.rs(scale3_u,target_size),\
+                                 self.rs(scale4_u,target_size), self.rs(scale5_u,target_size)],axis=3)
 
             #先只看saliency部分
-            self.metric=self.conv_bn_scale_relu(result,train,nout=16)
+            self.metric=self.conv_bn_scale_relu(data,train,nout=16,name="metric")
             #sal=self.conv_bn_scale_relu(result,train,nout=2)
 
-            sal=self._fc_layer(self.fc7, "final2",
-                                            relu=False)
+            sal=self.conv_bn_scale_relu(data,train,nout=2,name="saliency")
             self.upsample=self._upscore_layer(sal,shape=self.bgr.get_shape(),
                                                 num_classes=2,
                                                 debug=debug, name='upsample',
-                                                ksize=16, stride=8)
+                                                ksize=16, stride=1)
             self.pred_prob = tf.nn.softmax(self.upsample, name='pred_prob')
             self.pred_up = tf.argmax(self.upsample, dimension=3) # for inference
-
+            print("metric",self.metric.get_shape())
+            print("sal", sal.get_shape())
+            print("pred_prob", self.pred_prob.get_shape())
+            print("pred_up", self.pred_up.get_shape())
 
 
 
@@ -366,7 +505,35 @@ class FCN8VGG:
             """
 
         if train:
-            
+
+            #####################################
+            ##############Metric loss##############
+            #####################################
+            print("taskkkk_labels",self.task_labels.get_shape())
+            fore_num = tf.reduce_mean(self.task_labels, axis=1)   #shape(self.task_label)=(8,256,512,1)
+            fore_num=tf.reduce_mean(fore_num,axis=1)
+            print("fore_num",fore_num.get_shape())
+            fore_center = self.task_labels*self.metric
+            print("fore_center",fore_center.get_shape())
+            fore_center = tf.reduce_mean(fore_center, 1)
+            fore_center = tf.reduce_mean(fore_center, 1)/fore_num
+
+            back_num = tf.reduce_mean(1-self.task_labels, axis=1)   #shape(self.task_label)=(8,256,512,1)
+            back_num=tf.reduce_mean(back_num,axis=1)
+            back_center = (1-self.task_labels)*self.metric
+            back_center = tf.reduce_mean(back_center, 1)
+            back_center = tf.reduce_mean(back_center, 1)/back_num
+
+
+            metric=tf.transpose(self.metric,perm=[1,2,0,3])
+
+            fore_loss=((metric-fore_center)**2-(metric-back_center)**2)
+            fore_loss=tf.transpose(fore_loss,perm=[2,0,1,3])*self.task_labels
+            back_loss=((metric-back_center)**2-(metric-fore_center)**2)
+            back_loss = tf.transpose(back_loss, perm=[2, 0, 1, 3]) * (1-self.task_labels)
+
+            self.metric_loss=tf.reduce_mean(fore_loss+back_loss)
+
             #####################################
             ##############Task loss##############
             #####################################
@@ -380,7 +547,7 @@ class FCN8VGG:
             
             # calculating the accuracy
             prediction = tf.cast(tf.gather(self.pred_up, tf.range(int(batch_size/2))), tf.int32) 
-            self.task_accur = tf.div(tf.reduce_sum(tf.cast(tf.equal(prediction,task_labels),tf.float32)), valid_pixel_num)
+            self.task_accur = tf.math.divide(tf.reduce_sum(tf.cast(tf.equal(prediction,task_labels),tf.float32)), valid_pixel_num)
             
             # calculating the loss
             task_labels = tf.multiply(task_labels, mask) # remove those pixels labeled as 255
@@ -392,6 +559,7 @@ class FCN8VGG:
             cross_entropy_mean = tf.reduce_mean(cross_entropy, name='xentropy_mean') # average over the batch
             tf.add_to_collection('losses', cross_entropy_mean)
             self.task_loss = tf.add_n(tf.get_collection('losses'), name='total_loss')
+            print("task_labels",task_labels)
         
         ######################################
         ###########adversarial net############
@@ -403,18 +571,20 @@ class FCN8VGG:
         if random_init_adnn and train:
             
             with tf.variable_scope('global_alignment'):
-                    
-                # discriminator for global alignment
-                self.GA_adnn1 = self._score_layer(self.fc7, "GA_adnn1")
+                print("result_adv",result_adv.get_shape())
+                # discriminator for global alignment4
+                self.GA_adnn1 = self._score_layer(result_adv, "GA_adnn1")
                 self.GA_adnn1 = tf.nn.relu(self.GA_adnn1)
-                self.GA_adnn1 = tf.nn.dropout(self.GA_adnn1, 0.5)
+                self.GA_adnn1 = tf.nn.dropout(self.GA_adnn1, rate=0.5)
                 
                 self.GA_adnn2 = self._score_layer(self.GA_adnn1, "GA_adnn2")
                 self.GA_adnn2 = tf.nn.relu(self.GA_adnn2)
-                self.GA_adnn2 = tf.nn.dropout(self.GA_adnn2, 0.5)
-
+                self.GA_adnn2 = tf.nn.dropout(self.GA_adnn2, rate=0.5)
+                print("gaadnn2",self.GA_adnn2.get_shape())
                 self.GA_adnn3 = self._score_layer(self.GA_adnn2, "GA_adnn3")
                 GA_domain_pred = tf.cast(tf.argmax(self.GA_adnn3, dimension=3), tf.int32)
+                print("gaadnn3", self.GA_adnn3.get_shape())
+                print("gaPREDICT",GA_domain_pred.get_shape())
                 self.GA_domain_accur = tf.reduce_mean(tf.cast(tf.equal(GA_domain_pred, domain_label), tf.float32))
                 GA_entropy = tf.nn.sparse_softmax_cross_entropy_with_logits(
                                      labels = domain_label,
@@ -429,9 +599,11 @@ class FCN8VGG:
 
         t_vars = tf.trainable_variables()
         
-        self.f_vars = [var for var in t_vars if 'feature_extractor' in var.name]
-        self.y_vars = [var for var in t_vars if 'label_predictor' in var.name]
-        
+        self.f_vars = [var for var in t_vars if 'feature_extractor' in var.name][:6]
+        self.y_vars = [var for var in t_vars if 'label_predictor' in var.name][:192]
+
+        print("f_vars",len(self.f_vars))
+        print("v_vars",len(self.y_vars))
         if train:
             self.ga_vars = [var for var in t_vars if 'global_alignment' in var.name]
 
@@ -571,14 +743,11 @@ class FCN8VGG:
             deconv = tf.nn.conv2d_transpose(bottom, weights, new_shape,
                                             strides=strides, padding='SAME')
 
-            if debug:
-                deconv = tf.Print(deconv, [tf.shape(deconv)],
-                                  message='Shape of %s' % name,
-                                  summarize=4, first_n=1)
+
 
         _activation_summary(deconv)
         return deconv
-    '''
+
     def get_deconv_filter(self, name, f_shape):
         """
         width = f_shape[0]
@@ -595,9 +764,7 @@ class FCN8VGG:
             weights[:, :, i, i] = bilinear
         """
         weights_2 = np.zeros(f_shape)
-        w_in = self.data_dict[name][0]
-        for i in range(f_shape[2]):
-            weights_2[:, :, i, i] = w_in[:,:,i]
+
         #weights_2 = np.tile(np.expand_dims(weights_2, 2), (1, 1, 19, 1))
         
         weights = weights_2.reshape(f_shape)
@@ -612,6 +779,7 @@ class FCN8VGG:
             tf.add_to_collection('losses', weight_decay)
         
         return var
+    '''
 
     def get_conv_filter(self, name):
         init = tf.constant_initializer(value=self.data_dict[name][0],

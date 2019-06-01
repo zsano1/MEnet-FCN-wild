@@ -19,11 +19,11 @@ parser.add_argument('--max_step', type=int, default=8)
 parser.add_argument('--start_step', type=int, default=0)
 parser.add_argument('--save_step', type=int, default=8)
 parser.add_argument('--train_dir', type=str, default='./trained_weight/')
-parser.add_argument('--input_width', type=int, default=512)
-parser.add_argument('--input_height', type=int, default=256)
+parser.add_argument('--input_width', type=int, default=64)
+parser.add_argument('--input_height', type=int, default=32)
 parser.add_argument('--gpu', type=str, default='0')
 parser.add_argument('--restore_path', type=str, required=False)
-parser.add_argument('--write_summary', type=bool, default=False)
+parser.add_argument('--write_summary', type=bool, default=True)
 
 args = parser.parse_args()
 #weight_path = args.weight_path
@@ -34,7 +34,7 @@ src_data_path="/home/shenao/Summer/FCNs_Wild/data/train.txt"
 tgt_data_path="/home/shenao/Summer/FCNs_Wild/data/train.txt"
 method = args.method
 #batch_size = args.batch_size
-batch_size=8
+batch_size=2
 iter_size = args.iter_size
 save_step = args.save_step
 max_step = args.max_step
@@ -43,7 +43,7 @@ train_dir = args.train_dir
 input_width = args.input_width
 input_height = args.input_height
 restore_path = args.restore_path
-train_method_city_dir = train_dir + method+ '/'+ city + '/'
+train_method_city_dir = "/home/shenao/Summer"
 
 model_path = './models/'
 sys.path.insert(0, model_path)
@@ -123,8 +123,8 @@ def train():
         # mode = 2 stands for reseting the gradients
         mode = tf.placeholder(tf.float32, shape=[], name='mode')
 
-        metric_loss = model.metric_loss
-
+        metric_loss = model.task_loss
+        print("loss",model.task_loss.shape)
         task_loss = model.task_loss
         task_accur = model.task_accur
 
@@ -165,8 +165,10 @@ def train():
         accum_grads_metric = [tf.zeros_like(var) for var in (f_vars + y_vars)]
         applied_grads_metric = [tf.zeros_like(var) for var in (f_vars + y_vars)]
         reset_grads_metric = [tf.zeros_like(var) for var in (f_vars + y_vars)]
+        print("stored_grads_metric", len(stored_grads_metric))
 
         stored_grads_task = [tf.Variable(tf.zeros(var.get_shape()), trainable=False) for var in (f_vars + y_vars)]
+        print("stored_grads_task",len(stored_grads_task))
         accum_grads_task = [tf.zeros_like(var) for var in (f_vars + y_vars)]
         applied_grads_task = [tf.zeros_like(var) for var in (f_vars + y_vars)]
         reset_grads_task = [tf.zeros_like(var) for var in (f_vars + y_vars)]
@@ -183,7 +185,7 @@ def train():
 
         # if mode == 2, reset the gradients
         for index in range(len(stored_grads_metric)):
-            reset_grads_task[index] = tf.cond(tf.equal(mode, 2),
+            reset_grads_metric[index] = tf.cond(tf.equal(mode, 2),
                                               lambda: stored_grads_metric[index].assign(
                                                   tf.zeros_like(stored_grads_metric[index])),
                                               lambda: tf.ones_like(stored_grads_metric[index]))
@@ -206,6 +208,7 @@ def train():
                                                     tf.zeros_like(stored_grads_GA_inv[index])),
                                                 lambda: tf.ones_like(stored_grads_GA_inv[index]))
 
+        opt_metric = tf.train.AdamOptimizer(learning_rate=lr)
         opt_task = tf.train.AdamOptimizer(learning_rate=lr)
         opt_GA = tf.train.AdamOptimizer(learning_rate=lr)
         opt_GA_inv = tf.train.AdamOptimizer(learning_rate=lr)
@@ -221,24 +224,28 @@ def train():
         #  grads_CA = tf.gradients(cw_loss, f_vars + y_vars)
 
         # accumulating the calculated gradients
+        print(len(stored_grads_GA_inv))
+        for index in range(len(stored_grads_GA_inv)):
+            print(index)
+            accum_grads_GA_inv[index] = stored_grads_GA_inv[index].assign_add(grads_GA_inv[index])
+            applied_grads_GA_inv[index] = tf.scalar_mul(1.0 / iter_size, accum_grads_GA_inv[index])
+        print("len",len(stored_grads_task))
+        for index in range(len(stored_grads_task)):
+            print(index)
+            accum_grads_task[index] = stored_grads_task[index].assign_add(grads_task[index])
+            applied_grads_task[index] = tf.scalar_mul(1.0 / iter_size, accum_grads_task[index])
         for index in range(len(stored_grads_metric)):
             accum_grads_metric[index] = stored_grads_metric[index].assign_add(grads_metric[index])
             applied_grads_metric[index] = tf.scalar_mul(1.0 / iter_size, accum_grads_metric[index])
-
-        for index in range(len(stored_grads_task)):
-            accum_grads_task[index] = stored_grads_task[index].assign_add(grads_task[index])
-            applied_grads_task[index] = tf.scalar_mul(1.0 / iter_size, accum_grads_task[index])
 
         for index in range(len(stored_grads_GA)):
             accum_grads_GA[index] = stored_grads_GA[index].assign_add(grads_GA[index])
             applied_grads_GA[index] = tf.scalar_mul(1.0 / iter_size, accum_grads_GA[index])
 
-        for index in range(len(stored_grads_GA_inv)):
-            accum_grads_GA_inv[index] = stored_grads_GA_inv[index].assign_add(grads_GA_inv[index])
-            applied_grads_GA_inv[index] = tf.scalar_mul(1.0 / iter_size, accum_grads_GA_inv[index])
+
 
         train_op_metric = tf.cond(tf.equal(mode, 1),
-                                  lambda: opt_task.apply_gradients(zip(applied_grads_metric, f_vars + y_vars)),
+                                  lambda: opt_metric.apply_gradients(zip(applied_grads_metric, f_vars + y_vars)),
                                   lambda: tf.no_op())
 
         train_op_task = tf.cond(tf.equal(mode, 1),

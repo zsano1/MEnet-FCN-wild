@@ -10,8 +10,7 @@ class Reader(object):
     
     def __init__(self, src_data_path, tgt_data_path, input_width=512, input_height=256, batch_size = 64, suffle=True):
         
-        assert batch_size % 2 == 0, 'batch_size must be a multiple of 2!'
-        
+
         if not os.path.isfile(src_data_path) or not os.path.isfile(tgt_data_path):
             print('No data!!!')
             exit(1)
@@ -86,16 +85,16 @@ class Reader(object):
         src_images_this_batch = np.array(src_images_this_batch).astype(np.float32)
         src_labels_this_batch = np.array(src_labels_this_batch).astype(np.float32)
         src_domain_labels_this_batch = np.zeros((src_labels_this_batch.shape[0],
-                                                 int(src_labels_this_batch.shape[1]/8),
-                                                 int(src_labels_this_batch.shape[2]/8),
+                                                 int(src_labels_this_batch.shape[1]),
+                                                 int(src_labels_this_batch.shape[2]),
                                                  src_labels_this_batch.shape[3]))
 
         tgt_images_this_batch = np.array(tgt_images_this_batch).astype(np.float32)
         tgt_labels_this_batch = np.array(tgt_labels_this_batch).astype(np.float32)
 
         tgt_domain_labels_this_batch = np.ones((tgt_labels_this_batch.shape[0],
-                                                 int(tgt_labels_this_batch.shape[1]/8),
-                                                 int(tgt_labels_this_batch.shape[2]/8),
+                                                 int(tgt_labels_this_batch.shape[1]),
+                                                 int(tgt_labels_this_batch.shape[2]),
                                                  tgt_labels_this_batch.shape[3]))
         images_this_batch = np.vstack((src_images_this_batch, tgt_images_this_batch))
         task_labels_this_batch = np.vstack((src_labels_this_batch, tgt_labels_this_batch))
